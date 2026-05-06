@@ -28,7 +28,8 @@ Fir: 0.372 | Ror: 0.064 | Nibi: 0.774 | train_model (R) 1:23:45 | embed_docs (PD
 
 ### Dashboard panel
 
-<img width="1151" height="806" alt="hpc_dashboard" src="https://github.com/user-attachments/assets/b65c78d0-b155-4526-9b39-4a5092d54d42" />
+<img width="1086" height="772" alt="hpc_dashboard" src="https://github.com/user-attachments/assets/68a738c6-9540-4e66-9606-8df27100d80d" />
+
 
 - date-range presets (24H / 7D / 30D / 90D / 1Y / All) plus custom start/end
 - per-cluster scoping and CPU/GPU toggles
