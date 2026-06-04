@@ -55,30 +55,47 @@ export function stopMonitoring(): void {
 function setupFileWatcher(): void {
     try {
         if (fs.existsSync(FILE_PATH)) {
-            fileWatcher = fs.watch(FILE_PATH, (eventType) => {
-                if (eventType === 'change') {
+            const watcher = fs.watch(FILE_PATH, (eventType) => {
+                if (eventType === 'rename') {
+                    // Atomic rename replaced the file (write_status uses temp+rename).
+                    // Re-attach so Linux inode-based watchers stay live.
+                    watcher.close();
+                    fileWatcher = undefined;
+                    setupFileWatcher();
+                    updateStatusBar();
+                } else if (eventType === 'change') {
                     updateStatusBar();
                 }
             });
+            watcher.on('error', () => {
+                watcher.close();
+                fileWatcher = undefined;
+                setupFileWatcher();
+            });
+            fileWatcher = watcher;
             return;
         }
 
         const fileDir = path.dirname(FILE_PATH);
         const fileName = path.basename(FILE_PATH);
-        fileWatcher = fs.watch(fileDir, (eventType, filename) => {
+        const watcher = fs.watch(fileDir, (eventType, filename) => {
             if (filename !== fileName) {
                 return;
             }
             if (eventType === 'rename') {
-                if (fileWatcher) {
-                    fileWatcher.close();
-                }
+                watcher.close();
+                fileWatcher = undefined;
                 setupFileWatcher();
                 updateStatusBar();
             } else if (eventType === 'change') {
                 updateStatusBar();
             }
         });
+        watcher.on('error', () => {
+            watcher.close();
+            fileWatcher = undefined;
+        });
+        fileWatcher = watcher;
     } catch (error) {
         console.error('Error setting up file watcher:', error);
         statusBarItem.text = '$(warning) Cannot watch file';
