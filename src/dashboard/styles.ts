@@ -107,6 +107,20 @@ h1 {
     height: auto;
     display: block;
 }
+.loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-descriptionForeground);
+    font-size: 14px;
+    z-index: 5;
+}
+.loading-overlay.hidden {
+    display: none;
+}
 .axis-label {
     fill: var(--vscode-descriptionForeground);
     font-size: 12px;

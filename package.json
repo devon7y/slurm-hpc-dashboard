@@ -2,7 +2,7 @@
   "name": "slurm-status-bar",
   "displayName": "HPC Usage Dashboard",
   "description": "Displays HPC job and fairshare history from local monitor files in the VS Code status bar and dashboard",
-  "version": "0.4.0",
+  "version": "0.8.0",
   "publisher": "devon7y",
   "repository": {
     "type": "git",

@@ -406,11 +406,11 @@ def select_fairshare_row(
         for account, fairshare in matching_rows:
             if account.lower() == preferred_name:
                 return format_fairshare(fairshare)
-        if resource == "gpu" and preferred_base:
+        if preferred_base:
             for account, fairshare in matching_rows:
                 if account.lower() == preferred_base.lower():
                     return format_fairshare(fairshare)
-        if resource == "gpu" and preferred_account_lower:
+        if preferred_account_lower:
             for account, fairshare in matching_rows:
                 if account.lower() == preferred_account_lower:
                     return format_fairshare(fairshare)
@@ -425,23 +425,25 @@ def select_fairshare_row(
         if account.lower().endswith(f"_{resource}")
     ]
     if not resource_rows:
-        if resource == "gpu":
-            generic_rows = [
-                (account, fairshare)
-                for account, fairshare in matching_rows
-                if not account.lower().endswith("_cpu")
-                and not account.lower().endswith("_gpu")
-            ]
-            if len(generic_rows) == 1:
-                selected_account, selected_fairshare = generic_rows[0]
-                log(
-                    "Warning: using unsuffixed fairshare row "
-                    f"{selected_account} for {remote} {resource} fairshare. "
-                    f"Set {FAIRSHARE_ACCOUNT_ENV} or "
-                    f"{env_key_for_remote(FAIRSHARE_ACCOUNT_ENV, remote)} "
-                    "to override."
-                )
-                return format_fairshare(selected_fairshare)
+        # Some clusters (e.g. Trillium's separate CPU/GPU subclusters) expose a
+        # single unsuffixed account rather than *_cpu / *_gpu rows; use it for
+        # whichever resource we are resolving.
+        generic_rows = [
+            (account, fairshare)
+            for account, fairshare in matching_rows
+            if not account.lower().endswith("_cpu")
+            and not account.lower().endswith("_gpu")
+        ]
+        if len(generic_rows) == 1:
+            selected_account, selected_fairshare = generic_rows[0]
+            log(
+                "Warning: using unsuffixed fairshare row "
+                f"{selected_account} for {remote} {resource} fairshare. "
+                f"Set {FAIRSHARE_ACCOUNT_ENV} or "
+                f"{env_key_for_remote(FAIRSHARE_ACCOUNT_ENV, remote)} "
+                "to override."
+            )
+            return format_fairshare(selected_fairshare)
         raise RuntimeError(
             f"no {resource} fairshare rows found for user {user} on "
             f"{ssh_alias_for_remote(remote, 'fairshare')}"
@@ -460,11 +462,18 @@ def select_fairshare_row(
     return format_fairshare(selected_fairshare)
 
 
-def fetch_fairshare(remote: str, user: str) -> dict[str, str]:
-    if fairshare_disabled_for_remote(remote):
-        return {resource: "n/a" for resource in FAIRSHARE_RESOURCES}
+def fairshare_alias_for_resource(
+    remote: str, resource: str, base_alias: str
+) -> str:
+    # Trillium splits CPU and GPU across two independent Slurm clusters, so their
+    # fairshare must be read from different automation nodes. A per-resource alias
+    # (e.g. SLURM_STATUS_BAR_FAIRSHARE_ALIAS_CPU_TRIL) overrides the base alias for
+    # just that resource; everything else keeps using one sshare call.
+    prefix = f"{FAIRSHARE_ALIAS_ENV}_{resource.upper()}"
+    return os.environ.get(env_key_for_remote(prefix, remote)) or base_alias
 
-    ssh_alias = ssh_alias_for_remote(remote, "fairshare")
+
+def fetch_fairshare_rows(ssh_alias: str, user: str) -> list[tuple[str, str]]:
     if not ensure_connection(ssh_alias):
         raise RuntimeError(f"unable to establish SSH connection to {ssh_alias}")
 
@@ -487,7 +496,6 @@ def fetch_fairshare(remote: str, user: str) -> dict[str, str]:
         raise RuntimeError(f"missing sshare column on {ssh_alias}: {exc}") from exc
 
     matching_rows: list[tuple[str, str]] = []
-
     for line in lines[1:]:
         columns = [column.strip() for column in line.split("|")]
         if len(columns) <= max(account_idx, user_idx, fairshare_idx):
@@ -499,18 +507,42 @@ def fetch_fairshare(remote: str, user: str) -> dict[str, str]:
         )
 
     if not matching_rows:
-        raise RuntimeError(
-            f"no fairshare rows found for user {user} on {ssh_alias}"
-        )
+        raise RuntimeError(f"no fairshare rows found for user {user} on {ssh_alias}")
 
+    return matching_rows
+
+
+def fetch_fairshare(remote: str, user: str) -> dict[str, str]:
+    if fairshare_disabled_for_remote(remote):
+        return {resource: "n/a" for resource in FAIRSHARE_RESOURCES}
+
+    base_alias = ssh_alias_for_remote(remote, "fairshare")
+    rows_by_alias: dict[str, list[tuple[str, str]] | None] = {}
     selected: dict[str, str] = {}
+
     for resource in FAIRSHARE_RESOURCES:
+        alias = fairshare_alias_for_resource(remote, resource, base_alias)
+        if alias not in rows_by_alias:
+            try:
+                rows_by_alias[alias] = fetch_fairshare_rows(alias, user)
+            except RuntimeError as exc:
+                log(
+                    f"Warning: failed to fetch {resource} fairshare for "
+                    f"{remote} via {alias}: {exc}"
+                )
+                rows_by_alias[alias] = None
+
+        matching_rows = rows_by_alias[alias]
+        if not matching_rows:
+            selected[resource] = "n/a"
+            continue
+
         try:
             selected[resource] = select_fairshare_row(
                 matching_rows, remote, resource, user
             )
         except RuntimeError as exc:
-            log(f"Warning: failed to fetch fairshare for {remote}: {exc}")
+            log(f"Warning: failed to fetch {resource} fairshare for {remote}: {exc}")
             selected[resource] = "n/a"
     return selected
 

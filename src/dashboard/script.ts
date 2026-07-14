@@ -1,18 +1,16 @@
 export const DASHBOARD_SCRIPT = `
-        const DASHBOARD = window.__DASHBOARD__;
-        const HISTORY_DATA = DASHBOARD.historyRows;
-        const HISTORY_SERIES = DASHBOARD.series;
-        const SERIES_LABELS = DASHBOARD.seriesLabels;
-        const SERIES_COLORS = DASHBOARD.seriesColors;
-        const SERIES_DASHARRAY = DASHBOARD.seriesDasharray;
-        const CLUSTERS = DASHBOARD.clusters;
-        const JOB_DATA = DASHBOARD.jobHistory;
-        const JOB_METRIC_KEYS = DASHBOARD.jobMetricKeys;
-        const JOB_METRIC_LABELS = DASHBOARD.jobMetricLabels;
-        const JOB_SNAPSHOTS = DASHBOARD.jobSnapshots;
-        const NODE_DATA = DASHBOARD.nodeHistory;
-        const NODE_METRIC_KEYS = DASHBOARD.nodeMetricKeys;
-        const NODE_METRIC_LABELS = DASHBOARD.nodeMetricLabels;
+        const vscode = acquireVsCodeApi();
+        // Data-derived state is filled in by applyPayload() once the extension
+        // host streams the dashboard payload in via postMessage.
+        let HISTORY_SERIES = [];
+        let SERIES_LABELS = {};
+        let SERIES_COLORS = {};
+        let SERIES_DASHARRAY = {};
+        let CLUSTERS = [];
+        let JOB_METRIC_KEYS = [];
+        let JOB_METRIC_LABELS = {};
+        let NODE_METRIC_KEYS = [];
+        let NODE_METRIC_LABELS = {};
         const svg = document.getElementById('chart');
         const tooltip = document.getElementById('chartTooltip');
         const legend = document.getElementById('legend');
@@ -32,8 +30,8 @@ export const DASHBOARD_SCRIPT = `
         const clearSelectionButton = document.getElementById('clearSelection');
         const presetButtons = Array.from(document.querySelectorAll('.preset-button'));
         const CHART = {
-            width: DASHBOARD.chartWidth,
-            height: DASHBOARD.chartHeight,
+            width: 1120,
+            height: 620,
             padding: { top: 28, right: 28, bottom: 72, left: 72 },
         };
         const MAX_POLYLINE_POINTS = 2000;
@@ -65,39 +63,19 @@ export const DASHBOARD_SCRIPT = `
             end: 'End',
             queue_change: 'Queue \\u0394',
         };
-        const JOB_METRIC_KEY_SET = new Set(JOB_METRIC_KEYS);
-        const NODE_METRIC_KEY_SET = new Set(NODE_METRIC_KEYS);
+        let JOB_METRIC_KEY_SET = new Set();
+        let NODE_METRIC_KEY_SET = new Set();
 
-        const allRows = HISTORY_DATA
-            .map((row) => ({
-                timestamp: row.timestamp,
-                date: new Date(row.timestamp),
-                values: row.values,
-            }))
-            .filter((row) => !Number.isNaN(row.date.getTime()));
-        const allJobRows = JOB_DATA
-            .map((row) => ({
-                timestamp: row.timestamp,
-                date: new Date(row.timestamp),
-                values: row.values,
-            }))
-            .filter((row) => !Number.isNaN(row.date.getTime()));
-        const allJobSnapshots = JOB_SNAPSHOTS
-            .map((row) => ({
-                ...row,
-                date: new Date(row.timestamp),
-            }))
-            .filter((row) => !Number.isNaN(row.date.getTime()));
-        const allNodeRows = NODE_DATA
-            .map((row) => ({
-                timestamp: row.timestamp,
-                date: new Date(row.timestamp),
-                values: row.values,
-            }))
-            .filter((row) => !Number.isNaN(row.date.getTime()));
-        const OVERLAY_METRIC_KEYS = [...JOB_METRIC_KEYS, ...NODE_METRIC_KEYS];
-        const OVERLAY_METRIC_LABELS = { ...JOB_METRIC_LABELS, ...NODE_METRIC_LABELS };
-        const allEvents = deriveEvents(allJobSnapshots, allJobRows);
+        // Populated by applyPayload(). Events and running intervals are derived
+        // on the extension host (from the raw snapshot CSV) and arrive ready to
+        // use, so the webview never touches the 100 MB / 725k-row snapshot data.
+        let allRows = [];
+        let allJobRows = [];
+        let allNodeRows = [];
+        let allEvents = [];
+        let allIntervals = [];
+        let OVERLAY_METRIC_KEYS = [];
+        let OVERLAY_METRIC_LABELS = {};
 
         function binarySearchNearest(sortedRows, targetMs) {
             if (sortedRows.length === 0) {
@@ -523,158 +501,6 @@ export const DASHBOARD_SCRIPT = `
             return match ? match.label : remote;
         }
 
-        function deriveEvents(snapshotRows, summaryRows) {
-            const snapshotsByTimestamp = new Map();
-            for (const row of snapshotRows) {
-                const key = row.date.getTime();
-                let bucket = snapshotsByTimestamp.get(key);
-                if (!bucket) {
-                    bucket = [];
-                    snapshotsByTimestamp.set(key, bucket);
-                }
-                bucket.push(row);
-            }
-
-            const timeline = Array.from(new Set(summaryRows.map((row) => row.date.getTime()))).sort((a, b) => a - b);
-            let previousJobs = new Map();
-            let previousSummary = null;
-            const events = [];
-
-            for (const timestamp of timeline) {
-                const date = new Date(timestamp);
-                const currentJobs = new Map();
-                for (const row of (snapshotsByTimestamp.get(timestamp) || [])) {
-                    currentJobs.set(\`\${row.remote}:\${row.jobId}\`, row);
-                }
-
-                for (const [jobKey, job] of currentJobs.entries()) {
-                    const previous = previousJobs.get(jobKey);
-                    if (!previous) {
-                        events.push({
-                            type: 'submit',
-                            date,
-                            timestamp: date.toISOString(),
-                            remote: job.remote,
-                            jobId: job.jobId,
-                            name: job.name,
-                            fromState: null,
-                            toState: job.state,
-                            numCpus: job.numCpus,
-                            numGpus: job.numGpus,
-                            elapsedHours: job.elapsedHours,
-                            remainingHours: job.remainingHours,
-                            timeLimitHours: job.timeLimitHours,
-                            gpuHoursRemaining: job.gpuHoursRemaining,
-                            note: 'Job first appeared in active queue snapshots.',
-                        });
-                        if (job.state === 'R') {
-                            events.push({
-                                type: 'start',
-                                date,
-                                timestamp: date.toISOString(),
-                                remote: job.remote,
-                                jobId: job.jobId,
-                                name: job.name,
-                                fromState: null,
-                                toState: job.state,
-                                numCpus: job.numCpus,
-                                numGpus: job.numGpus,
-                                elapsedHours: job.elapsedHours,
-                                remainingHours: job.remainingHours,
-                                timeLimitHours: job.timeLimitHours,
-                                gpuHoursRemaining: job.gpuHoursRemaining,
-                                note: 'Job appeared already running.',
-                            });
-                        }
-                        continue;
-                    }
-
-                    if (previous.state !== job.state && job.state === 'R') {
-                        events.push({
-                            type: 'start',
-                            date,
-                            timestamp: date.toISOString(),
-                            remote: job.remote,
-                            jobId: job.jobId,
-                            name: job.name,
-                            fromState: previous.state,
-                            toState: job.state,
-                            numCpus: job.numCpus,
-                            numGpus: job.numGpus,
-                            elapsedHours: job.elapsedHours,
-                            remainingHours: job.remainingHours,
-                            timeLimitHours: job.timeLimitHours,
-                            gpuHoursRemaining: job.gpuHoursRemaining,
-                            note: \`State changed \${previous.state} \\u2192 \${job.state}.\`,
-                        });
-                    }
-                }
-
-                for (const [jobKey, previous] of previousJobs.entries()) {
-                    if (!currentJobs.has(jobKey)) {
-                        events.push({
-                            type: 'end',
-                            date,
-                            timestamp: date.toISOString(),
-                            remote: previous.remote,
-                            jobId: previous.jobId,
-                            name: previous.name,
-                            fromState: previous.state,
-                            toState: null,
-                            numCpus: previous.numCpus,
-                            numGpus: previous.numGpus,
-                            elapsedHours: previous.elapsedHours,
-                            remainingHours: previous.remainingHours,
-                            timeLimitHours: previous.timeLimitHours,
-                            gpuHoursRemaining: previous.gpuHoursRemaining,
-                            note: 'Job disappeared from active queue snapshots.',
-                        });
-                    }
-                }
-
-                const currentSummary = summaryRows.find((row) => row.date.getTime() === timestamp) || null;
-                if (previousSummary && currentSummary) {
-                    const totalDelta = (currentSummary.values.total_jobs || 0) - (previousSummary.values.total_jobs || 0);
-                    if (Math.abs(totalDelta) >= 2) {
-                        events.push({
-                            type: 'queue_change',
-                            date,
-                            timestamp: date.toISOString(),
-                            remote: 'all',
-                            note: \`Total jobs changed by \${totalDelta >= 0 ? '+' : ''}\${totalDelta}.\`,
-                            deltaJobs: totalDelta,
-                            beforeJobs: previousSummary.values.total_jobs || 0,
-                            afterJobs: currentSummary.values.total_jobs || 0,
-                        });
-                    }
-
-                    for (const cluster of CLUSTERS) {
-                        const key = clusterMetricKey(cluster.cluster, 'jobs');
-                        const before = previousSummary.values[key] || 0;
-                        const after = currentSummary.values[key] || 0;
-                        const delta = after - before;
-                        if (Math.abs(delta) >= 2) {
-                            events.push({
-                                type: 'queue_change',
-                                date,
-                                timestamp: date.toISOString(),
-                                remote: cluster.cluster,
-                                note: \`\${cluster.label} jobs changed by \${delta >= 0 ? '+' : ''}\${delta}.\`,
-                                deltaJobs: delta,
-                                beforeJobs: before,
-                                afterJobs: after,
-                            });
-                        }
-                    }
-                }
-
-                previousJobs = currentJobs;
-                previousSummary = currentSummary;
-            }
-
-            return events.sort((left, right) => left.date.getTime() - right.date.getTime());
-        }
-
         function filteredEventsForRange(startDate, endDate) {
             const cluster = selectedCluster();
             const startMs = startDate.getTime();
@@ -690,69 +516,33 @@ export const DASHBOARD_SCRIPT = `
             return result;
         }
 
+        // Intervals are precomputed on the host over all history; here we just
+        // filter to the selected cluster and clip each span to the visible range.
         function runningIntervalsForRange(startDate, endDate) {
             const cluster = selectedCluster();
             const startMs = startDate.getTime();
             const endMs = endDate.getTime();
-            const snapshotsByTimestamp = new Map();
-            for (const snapshot of allJobSnapshots) {
-                const t = snapshot.date.getTime();
-                if (t < startMs || t > endMs) {
+            const result = [];
+            for (const interval of allIntervals) {
+                if (cluster !== 'all' && interval.remote !== cluster) {
                     continue;
                 }
-                if (cluster !== 'all' && snapshot.remote !== cluster) {
+                if (interval.start.getTime() > endMs || interval.end.getTime() < startMs) {
                     continue;
                 }
-                let bucket = snapshotsByTimestamp.get(t);
-                if (!bucket) {
-                    bucket = [];
-                    snapshotsByTimestamp.set(t, bucket);
-                }
-                bucket.push(snapshot);
-            }
-
-            const timeline = Array.from(snapshotsByTimestamp.keys()).sort((a, b) => a - b);
-            const activeByJob = new Map();
-            const intervals = [];
-
-            for (const timestamp of timeline) {
-                const snapshotDate = new Date(timestamp);
-                const runningRows = (snapshotsByTimestamp.get(timestamp) || []).filter((row) => row.state === 'R');
-                const runningKeys = new Set();
-
-                for (const row of runningRows) {
-                    const jobKey = row.remote + ':' + row.jobId;
-                    runningKeys.add(jobKey);
-                    if (!activeByJob.has(jobKey)) {
-                        activeByJob.set(jobKey, {
-                            remote: row.remote,
-                            jobId: row.jobId,
-                            name: row.name,
-                            start: snapshotDate,
-                        });
-                    }
-                }
-
-                for (const [jobKey, span] of activeByJob.entries()) {
-                    if (runningKeys.has(jobKey)) {
-                        continue;
-                    }
-                    intervals.push({ ...span, end: snapshotDate });
-                    activeByJob.delete(jobKey);
+                const start = interval.start.getTime() < startMs ? startDate : interval.start;
+                const end = interval.end.getTime() > endMs ? endDate : interval.end;
+                if (end.getTime() > start.getTime()) {
+                    result.push({
+                        remote: interval.remote,
+                        jobId: interval.jobId,
+                        name: interval.name,
+                        start,
+                        end,
+                    });
                 }
             }
-
-            for (const span of activeByJob.values()) {
-                intervals.push({ ...span, end: endDate });
-            }
-
-            return intervals
-                .map((span) => ({
-                    ...span,
-                    start: span.start < startDate ? startDate : span.start,
-                    end: span.end > endDate ? endDate : span.end,
-                }))
-                .filter((span) => span.end.getTime() > span.start.getTime());
+            return result;
         }
 
         function layoutIntervalsIntoLanes(intervals) {
@@ -1877,14 +1667,94 @@ export const DASHBOARD_SCRIPT = `
             scheduleRender();
         });
 
-        initializeJobMetricSelect();
-        if (allRows.length > 0) {
-            applyPreset('7d');
-        } else {
-            metrics.innerHTML = '<span>No fairshare history samples are available yet.</span>';
-            updateLegend([], visibleSeriesKeys());
-            renderSelectionSummary();
-            renderJobStats([]);
-            svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="axis-label">No fairshare history samples are available yet.</text>';
+        // Rebuild row objects from the columnar payload. This is the same shape
+        // the rest of the code expects ({ timestamp, date, values }); packing the
+        // transport columnar just strips the repeated per-row key names.
+        function reconstructRows(packed) {
+            if (!packed || !packed.timestamps) {
+                return [];
+            }
+            const timestamps = packed.timestamps;
+            const keys = packed.keys || [];
+            const columns = packed.columns || {};
+            const rows = [];
+            for (let i = 0; i < timestamps.length; i++) {
+                const date = new Date(timestamps[i]);
+                if (Number.isNaN(date.getTime())) {
+                    continue;
+                }
+                const values = {};
+                for (let k = 0; k < keys.length; k++) {
+                    const column = columns[keys[k]];
+                    const value = column ? column[i] : null;
+                    if (value !== null && value !== undefined) {
+                        values[keys[k]] = value;
+                    }
+                }
+                rows.push({ timestamp: timestamps[i], date, values });
+            }
+            return rows;
         }
+
+        function applyPayload(payload) {
+            if (!payload) {
+                return;
+            }
+            CHART.width = payload.chartWidth || CHART.width;
+            CHART.height = payload.chartHeight || CHART.height;
+            HISTORY_SERIES = payload.series || [];
+            SERIES_LABELS = payload.seriesLabels || {};
+            SERIES_COLORS = payload.seriesColors || {};
+            SERIES_DASHARRAY = payload.seriesDasharray || {};
+            CLUSTERS = payload.clusters || [];
+            JOB_METRIC_KEYS = payload.jobMetricKeys || [];
+            JOB_METRIC_LABELS = payload.jobMetricLabels || {};
+            NODE_METRIC_KEYS = payload.nodeMetricKeys || [];
+            NODE_METRIC_LABELS = payload.nodeMetricLabels || {};
+            JOB_METRIC_KEY_SET = new Set(JOB_METRIC_KEYS);
+            NODE_METRIC_KEY_SET = new Set(NODE_METRIC_KEYS);
+            OVERLAY_METRIC_KEYS = [...JOB_METRIC_KEYS, ...NODE_METRIC_KEYS];
+            OVERLAY_METRIC_LABELS = { ...JOB_METRIC_LABELS, ...NODE_METRIC_LABELS };
+
+            allRows = reconstructRows(payload.history);
+            allJobRows = reconstructRows(payload.jobHistory);
+            allNodeRows = reconstructRows(payload.nodeHistory);
+            allEvents = (payload.events || [])
+                .map((event) => ({ ...event, date: new Date(event.timestamp) }))
+                .filter((event) => !Number.isNaN(event.date.getTime()))
+                .sort((left, right) => left.date.getTime() - right.date.getTime());
+            allIntervals = (payload.intervals || [])
+                .map((interval) => ({
+                    remote: interval.remote,
+                    jobId: interval.jobId,
+                    name: interval.name,
+                    start: new Date(interval.start),
+                    end: new Date(interval.end),
+                }))
+                .filter((interval) => !Number.isNaN(interval.start.getTime()) && !Number.isNaN(interval.end.getTime()));
+
+            const loadingOverlay = document.getElementById('loadingOverlay');
+            if (loadingOverlay) {
+                loadingOverlay.classList.add('hidden');
+            }
+
+            initializeJobMetricSelect();
+            if (allRows.length > 0) {
+                applyPreset('7d');
+            } else {
+                metrics.innerHTML = '<span>No fairshare history samples are available yet.</span>';
+                updateLegend([], visibleSeriesKeys());
+                renderSelectionSummary();
+                renderJobStats([]);
+                svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="axis-label">No fairshare history samples are available yet.</text>';
+            }
+        }
+
+        window.addEventListener('message', (event) => {
+            const message = event.data;
+            if (message && message.type === 'dashboard') {
+                applyPayload(message.payload);
+            }
+        });
+        vscode.postMessage({ type: 'ready' });
 `;

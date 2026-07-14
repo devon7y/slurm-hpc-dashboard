@@ -9,6 +9,15 @@ import type {
     JobSnapshotRow,
 } from './types';
 
+// The monitor writes plain values (SLURM job names, numbers, ISO timestamps)
+// with no embedded commas or quotes, so the overwhelming majority of rows can
+// use a plain split — an order of magnitude faster than the char scanner over
+// the ~725k-row snapshot file. Fall back to the robust parser only if a quote
+// is present (i.e. a field that was actually escaped).
+export function splitCsvRow(line: string): string[] {
+    return line.indexOf('"') === -1 ? line.split(',') : parseCsvLine(line);
+}
+
 export function parseCsvLine(line: string): string[] {
     const values: string[] = [];
     let current = '';
@@ -66,7 +75,7 @@ export function parseHistoryCsv(content: string): HistoryRow[] {
     const seriesSet = new Set<string>(HISTORY_SERIES);
 
     return lines.slice(1).map((line) => {
-        const columns = parseCsvLine(line);
+        const columns = splitCsvRow(line);
         const timestamp = columns[0] ?? '';
         const values: Partial<Record<HistorySeriesKey, number>> = {};
 
@@ -96,7 +105,7 @@ export function parseJobHistoryCsv(content: string): JobHistoryData {
     const header = parseCsvLine(lines[0]).map((column) => column.trim());
     const metricKeys = header.slice(1);
     const rows = lines.slice(1).map((line) => {
-        const columns = parseCsvLine(line);
+        const columns = splitCsvRow(line);
         const values: Record<string, number | undefined> = {};
         for (let index = 0; index < metricKeys.length; index += 1) {
             values[metricKeys[index]] = parseMaybeNumber(columns[index + 1]);
@@ -129,7 +138,7 @@ export function parseJobSnapshotCsv(content: string): JobSnapshotRow[] {
     const normalizeText = (value: string): string => value.trim().replace(/^'+|'+$/g, '');
 
     return lines.slice(1).map((line) => {
-        const columns = parseCsvLine(line);
+        const columns = splitCsvRow(line);
         return {
             timestamp: normalizeText(readColumn(columns, 'timestamp')),
             remote: normalizeText(readColumn(columns, 'remote')),

@@ -10,13 +10,20 @@ import {
 import type {
     HistoryRow,
     JobHistoryData,
-    JobSnapshotRow,
 } from '../types';
 import { DASHBOARD_STYLES } from './styles';
 import { DASHBOARD_SCRIPT } from './script';
+import { downsampleRows, packRows } from './derive';
+import type { EventRecord, IntervalRecord } from './derive';
 
 const CHART_WIDTH = 1120;
 const CHART_HEIGHT = 620;
+
+// Cap on job/node history rows shipped to the webview. At the monitor's ~1-minute
+// cadence this is still ~5-6 days at full resolution and coarser further back —
+// plenty for the overlay line and stats, and it keeps the payload small enough to
+// deliver in well under a second.
+const MAX_METRIC_ROWS = 8000;
 
 function humanizeJobMetricLabel(metricKey: string): string {
     return metricKey
@@ -45,16 +52,39 @@ function escapeHtml(value: string): string {
         .replace(/'/g, '&#39;');
 }
 
-function buildDashboardPayload(
+// A serializable object sent to the webview via postMessage. Deliberately holds
+// no raw job snapshots — only the columnar history plus the derived events and
+// running intervals — so the payload stays small as history grows.
+export interface DashboardPayload {
+    chartWidth: number;
+    chartHeight: number;
+    series: string[];
+    seriesLabels: Record<string, string>;
+    seriesColors: Record<string, string>;
+    seriesDasharray: Record<string, string>;
+    clusters: Array<{ cluster: string; label: string; cpu: string; gpu: string }>;
+    history: ReturnType<typeof packRows>;
+    jobHistory: ReturnType<typeof packRows>;
+    jobMetricKeys: string[];
+    jobMetricLabels: Record<string, string>;
+    nodeHistory: ReturnType<typeof packRows>;
+    nodeMetricKeys: string[];
+    nodeMetricLabels: Record<string, string>;
+    events: EventRecord[];
+    intervals: IntervalRecord[];
+}
+
+export function buildDashboardPayload(
     historyRows: HistoryRow[],
     jobHistory: JobHistoryData,
-    jobSnapshots: JobSnapshotRow[],
     nodeHistory: JobHistoryData,
-): string {
-    const payload = {
+    events: EventRecord[],
+    intervals: IntervalRecord[],
+): DashboardPayload {
+    return {
         chartWidth: CHART_WIDTH,
         chartHeight: CHART_HEIGHT,
-        series: HISTORY_SERIES,
+        series: [...HISTORY_SERIES],
         seriesLabels: SERIES_DISPLAY,
         seriesColors: SERIES_COLORS,
         seriesDasharray: SERIES_DASHARRAY,
@@ -64,41 +94,28 @@ function buildDashboardPayload(
             cpu: `${cluster}_cpu`,
             gpu: `${cluster}_gpu`,
         })),
-        historyRows: historyRows.map((row) => ({
-            timestamp: row.timestamp,
-            values: Object.fromEntries(
-                HISTORY_SERIES.map((series) => [series, row.values[series] ?? null]),
-            ),
-        })),
-        jobHistory: jobHistory.rows.map((row) => ({
-            timestamp: row.timestamp,
-            values: row.values,
-        })),
+        history: packRows(
+            historyRows as unknown as Array<{ timestamp: string; values: Record<string, number | undefined> }>,
+            HISTORY_SERIES,
+        ),
+        jobHistory: packRows(downsampleRows(jobHistory.rows, MAX_METRIC_ROWS), jobHistory.metricKeys),
         jobMetricKeys: jobHistory.metricKeys,
         jobMetricLabels: Object.fromEntries(
             jobHistory.metricKeys.map((key) => [key, humanizeJobMetricLabel(key)]),
         ),
-        jobSnapshots,
-        nodeHistory: nodeHistory.rows.map((row) => ({
-            timestamp: row.timestamp,
-            values: row.values,
-        })),
+        nodeHistory: packRows(downsampleRows(nodeHistory.rows, MAX_METRIC_ROWS), nodeHistory.metricKeys),
         nodeMetricKeys: nodeHistory.metricKeys,
         nodeMetricLabels: Object.fromEntries(
             nodeHistory.metricKeys.map((key) => [key, humanizeJobMetricLabel(key)]),
         ),
+        events,
+        intervals,
     };
-    return JSON.stringify(payload).replace(/</g, '\\u003c');
 }
 
-export function buildFairshareGraphHtml(
-    historyRows: HistoryRow[],
-    jobHistory: JobHistoryData,
-    jobSnapshots: JobSnapshotRow[],
-    nodeHistory: JobHistoryData,
-): string {
-    const bootstrap = buildDashboardPayload(historyRows, jobHistory, jobSnapshots, nodeHistory);
-
+// The webview is opened with this static shell immediately, then the payload is
+// streamed in via postMessage once the (heavier) host-side data prep finishes.
+export function buildDashboardShellHtml(): string {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -158,6 +175,7 @@ export function buildFairshareGraphHtml(
         <div class="chart-shell">
             <svg id="chart" viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT}" role="img" aria-label="Fairshare history chart"></svg>
             <div id="chartTooltip" class="tooltip"></div>
+            <div id="loadingOverlay" class="loading-overlay">Loading dashboard data…</div>
         </div>
         <div id="metrics" class="metrics"></div>
         <div id="legend" class="legend"></div>
@@ -168,7 +186,6 @@ export function buildFairshareGraphHtml(
         <div id="eventTableView" class="section-block"></div>
         <div class="footer">The graph auto-zooms the y-axis to the selected date range so shallow fairshare changes are easier to see. Hover over the chart to inspect exact values at the nearest recorded sample.</div>
     </div>
-    <script>window.__DASHBOARD__ = ${bootstrap};</script>
     <script>${DASHBOARD_SCRIPT}</script>
 </body>
 </html>`;

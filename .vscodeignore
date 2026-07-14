@@ -9,3 +9,12 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/__pycache__/**
+
+# Repo working files that are not part of the runtime extension
+*.txt
+*.sh
+*.png
+*.vsix
+scripts/**
+examples/**
+media/**
