@@ -1023,7 +1023,11 @@ def build_output(
             if job.state == "PD"
             else job.time_left_seconds
         )
-        parts.append(f"{job.name} ({job.state}) {seconds_to_time(seconds)}")
+        # The "@remote" tag lets the status bar extension break each job group's
+        # hover down by HPC; it strips the tag from the visible item text.
+        parts.append(
+            f"{job.name} ({job.state}) {seconds_to_time(seconds)} @{job.remote}"
+        )
     return " | ".join(parts)
 
 

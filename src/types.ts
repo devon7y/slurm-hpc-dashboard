@@ -4,6 +4,7 @@ export interface JobEntry {
     name: string;
     state: string;
     timer: string;
+    remote?: string;
 }
 
 export interface HistoryRow {
