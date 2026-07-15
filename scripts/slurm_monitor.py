@@ -176,8 +176,35 @@ def passcode_fallback_disabled(remote: str) -> bool:
     )
 
 
-def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True)
+# Bound every ssh so one wedged connection can never freeze the whole monitor
+# loop (which stops the status bar from updating). ConnectTimeout guards the TCP
+# connect; ServerAlive kills a session that hangs after connecting; the
+# subprocess-level timeout in run_command is the final backstop.
+SSH_TIMEOUT_OPTS = [
+    "-o",
+    "ConnectTimeout=15",
+    "-o",
+    "ServerAliveInterval=10",
+    "-o",
+    "ServerAliveCountMax=3",
+]
+COMMAND_TIMEOUT_SECONDS = 45.0
+
+
+def run_command(
+    args: list[str], timeout: float = COMMAND_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            args,
+            returncode=124,
+            stdout=exc.stdout or "",
+            stderr=f"command timed out after {timeout:.0f}s",
+        )
 
 
 def find_sshpass() -> str | None:
@@ -317,7 +344,7 @@ def fetch_jobs(remote: str, user: str) -> list[JobState]:
         f"squeue -u {shlex.quote(user)} --noheader "
         "-o '%i|%j|%t|%L|%M|%l|%D|%C|%b'"
     )
-    result = run_command(["ssh", ssh_alias, remote_cmd])
+    result = run_command(["ssh", *SSH_TIMEOUT_OPTS, ssh_alias, remote_cmd])
     if result.returncode != 0:
         details = (result.stderr or result.stdout).strip()
         raise RuntimeError(details or f"squeue failed on {ssh_alias}")
@@ -478,7 +505,7 @@ def fetch_fairshare_rows(ssh_alias: str, user: str) -> list[tuple[str, str]]:
         raise RuntimeError(f"unable to establish SSH connection to {ssh_alias}")
 
     remote_cmd = f"sshare -u {shlex.quote(user)} -l -P"
-    result = run_command(["ssh", ssh_alias, remote_cmd])
+    result = run_command(["ssh", *SSH_TIMEOUT_OPTS, ssh_alias, remote_cmd])
     if result.returncode != 0:
         details = (result.stderr or result.stdout).strip()
         raise RuntimeError(details or f"sshare failed on {ssh_alias}")
@@ -553,7 +580,7 @@ def fetch_node_availability(remote: str) -> dict[str, str]:
         raise RuntimeError(f"unable to establish SSH connection to {ssh_alias}")
 
     remote_cmd = "scontrol show node -o"
-    result = run_command(["ssh", ssh_alias, remote_cmd])
+    result = run_command(["ssh", *SSH_TIMEOUT_OPTS, ssh_alias, remote_cmd])
     if result.returncode != 0:
         details = (result.stderr or result.stdout).strip()
         raise RuntimeError(details or f"scontrol show node failed on {ssh_alias}")
